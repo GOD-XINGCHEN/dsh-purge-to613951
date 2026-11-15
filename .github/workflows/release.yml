@@ -1,0 +1,65 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.repository == 'tom613951/dsh-purge'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Syntax-check plugin entry
+        run: |
+          for f in bin/*.js client.js lib/*.js lib/*.mjs lib/patches/*.js lib/redteam/*.js lib/redteam/*.mjs; do
+            [ -e "$f" ] || continue
+            node --check "$f"
+          done
+          node --input-type=module -e "import './lib/index.js'"
+
+      - name: Run tests
+        run: npm test
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          tag="v${version}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "already published: $tag"
+            exit 0
+          fi
+          zip="dsh-purge-${version}.zip"
+          if git rev-parse -q --verify "refs/tags/${tag}^{}" >/dev/null; then
+            commit="$(git rev-parse "refs/tags/${tag}^{}")"
+            git archive --format=zip --prefix="dsh-purge-${version}/" --output="$zip" "$commit"
+            gh release create "$tag" --title "$tag" --notes "$tag"
+          else
+            git archive --format=zip --prefix="dsh-purge-${version}/" --output="$zip" HEAD
+            args=(release create "$tag" --target "$GITHUB_SHA" --title "$tag" --notes "$tag")
+            case "$version" in
+              *beta*|*alpha*) args+=(--prerelease) ;;
+            esac
+            gh "${args[@]}"
+          fi
+          test -s "$zip"
+          gh release upload "$tag" "$zip" --clobber
+          gh release list --limit 100 --json tagName --jq '.[].tagName' | while IFS= read -r old_tag; do
+            [ -n "$old_tag" ] && [ "$old_tag" != "$tag" ] || continue
+            gh release delete "$old_tag" --yes --cleanup-tag || true
+          done
+          echo "published https://github.com/tom613951/dsh-purge/releases/tag/${tag}"
